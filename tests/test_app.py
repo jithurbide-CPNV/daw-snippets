@@ -7,7 +7,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from simppetssrv.app import create_app
-from simppetssrv.members import create_user, mark_email_verified
+from simppetssrv.members import create_user
 from simppetssrv.snippets import create_snippet
 
 
@@ -38,7 +38,7 @@ def make_client(app):
 @pytest.mark.asyncio
 async def test_home_lists_public_snippets(app):
     db_path = app.state.db_path
-    owner_id = create_user(db_path, email="owner@example.com", password="secret", verified=True)
+    owner_id = create_user(db_path, email="owner@example.com", password="secret")
     create_snippet(
         db_path,
         owner_id=owner_id,
@@ -72,8 +72,7 @@ async def _login(client: AsyncClient, email: str, password: str) -> dict[str, st
 @pytest.mark.asyncio
 async def test_authenticated_user_can_create_snippet(app):
     db_path = app.state.db_path
-    user_id = create_user(db_path, email="writer@example.com", password="secret", verified=True)
-    mark_email_verified(db_path, user_id)
+    user_id = create_user(db_path, email="writer@example.com", password="secret")
 
     async with make_client(app) as client:
         headers = await _login(client, "writer@example.com", "secret")
@@ -101,10 +100,29 @@ async def test_authenticated_user_can_create_snippet(app):
 
 
 @pytest.mark.asyncio
+async def test_signup_auto_logs_in(app):
+    async with make_client(app) as client:
+        response = await client.post(
+            "/signup",
+            data={"email": "new-user@example.com", "password": "password123"},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 303
+    cookie = response.headers.get("set-cookie")
+    assert cookie and "snippet_member" in cookie
+
+    async with make_client(app) as client:
+        homepage = await client.get("/", headers={"Cookie": cookie})
+
+    assert homepage.status_code == 200
+    assert "Créer un snippet" in homepage.text
+
+
+@pytest.mark.asyncio
 async def test_private_snippet_requires_access_request(app):
     db_path = app.state.db_path
-    owner_id = create_user(db_path, email="owner@example.com", password="secret", verified=True)
-    mark_email_verified(db_path, owner_id)
+    owner_id = create_user(db_path, email="owner@example.com", password="secret")
     snippet_id = create_snippet(
         db_path,
         owner_id=owner_id,
@@ -115,8 +133,7 @@ async def test_private_snippet_requires_access_request(app):
         visibility="private",
     )
 
-    requester_id = create_user(db_path, email="user@example.com", password="pass123", verified=True)
-    mark_email_verified(db_path, requester_id)
+    requester_id = create_user(db_path, email="user@example.com", password="pass123")
 
     async with make_client(app) as client:
         headers = await _login(client, "user@example.com", "pass123")
@@ -144,8 +161,7 @@ async def test_private_snippet_requires_access_request(app):
 @pytest.mark.asyncio
 async def test_admin_can_approve_request(app):
     db_path = app.state.db_path
-    owner_id = create_user(db_path, email="owner2@example.com", password="secret", verified=True)
-    mark_email_verified(db_path, owner_id)
+    owner_id = create_user(db_path, email="owner2@example.com", password="secret")
     snippet_id = create_snippet(
         db_path,
         owner_id=owner_id,
@@ -155,8 +171,7 @@ async def test_admin_can_approve_request(app):
         body="settings:\n  debug: false",
         visibility="private",
     )
-    requester_id = create_user(db_path, email="dev@example.com", password="secret", verified=True)
-    mark_email_verified(db_path, requester_id)
+    requester_id = create_user(db_path, email="dev@example.com", password="secret")
 
     async with make_client(app) as client:
         requester_headers = await _login(client, "dev@example.com", "secret")

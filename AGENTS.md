@@ -27,21 +27,20 @@ This document equips agentic coders to work effectively on the Snippet Vault cod
 
 ## 4. Project Layout
 - `src/simppetssrv/app.py`: FastAPI wiring, HTML rendering helpers, route definitions.
-- `src/simppetssrv/members.py`: lightweight SQLite data access for users, email/password tokens, cookie signing.
+- `src/simppetssrv/members.py`: lightweight SQLite data access for users and session cookies.
 - `src/simppetssrv/snippets.py`: SQLite helpers for snippets and access requests.
 - `src/simppetssrv/__main__.py`: CLI entry, reads `SIMPPETSSRV_*` env vars, starts uvicorn.
 - `tests/`: async tests for core flows plus CLI helper coverage; `conftest.py` injects `src/` into `PYTHONPATH`.
 - `README.md` / `AGENTS.md`: keep these in sync with behaviour/tooling changes.
 
-## 5. Database Schema (SQLite)
-- Tables: `users`, `snippets`, `snippet_access_requests`, `email_tokens`, `password_reset_tokens`.
+- Tables: `users`, `snippets`, `snippet_access_requests`.
 - Tables are created lazily via `CREATE TABLE IF NOT EXISTS`; no migrations yet. When expanding schema, update helper functions to keep compatibility and mention upgrade steps here.
 - Datetimes stored as ISO 8601 strings (UTC). Handle conversions carefully—always attach tzinfo before comparisons.
 
 ## 6. Auth Model
 - Users authenticate with email + password; hashing uses PBKDF2 via `hashlib.pbkdf2_hmac` (see `members.py`).
 - Session cookie format: `user_id|timestamp|signature` with HMAC-SHA256. Keep this stable; refer to `_build_member_cookie` and `_parse_member_cookie` before editing.
-- No email delivery by default. `_send_*` helpers log to stdout; integrate actual SMTP by replacing these functions and documenting required env vars.
+- No email delivery or token workflow : les comptes sont actifs immédiatement après inscription.
 
 ## 7. Snippet Access Rules
 - `public`: visible to everyone.
@@ -139,8 +138,7 @@ This document equips agentic coders to work effectively on the Snippet Vault cod
 ## 23. Security Notes
 - Cookie signing uses HMAC-SHA256; updating the format requires bumping clients to clear old sessions.
 - Password hashing relies on PBKDF2 with 200k iterations; adjust cost carefully and document rationale.
-- Email and password reset tokens are single-use; they expire automatically via timestamp checks.
-- When integrating real email delivery, prefer transactional providers and store configuration secrets outside the repo.
+- Si vous introduisez un flux de réinitialisation de mot de passe, documentez-le et évitez de stocker des secrets en clair.
 - Audit new dependencies for licence/compliance before adding them to `pyproject.toml`.
 
 Happy coding—ship confidently!

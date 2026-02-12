@@ -1,6 +1,6 @@
 # Snippet Vault
 
-FastAPI application for managing code snippets with public and private visibility. Users can create accounts, store snippets, and request access to private entries. Admin users review access requests and approve or deny them from a queue.
+FastAPI application for managing code snippets with public and private visibility. Users can create accounts, store snippets, and request access to private entries. Admin users review access requests and approve or deny them from a queue. Accounts sont actifs immédiatement, aucune vérification email n’est nécessaire.
 
 ## Quick Start
 
@@ -36,8 +36,8 @@ The application creates tables on demand; no migrations are required.
 
 ## Accounts and Access
 
-1. Users sign up at `/signup`. Verification emails are simulated and logged to stdout.
-2. After verification, users can create snippets at `/snippets/new`.
+1. Users sign up at `/signup` et sont connectés automatiquement.
+2. Depuis cet état connecté, ils créent des snippets via `/snippets/new`.
 3. Public snippets appear for everyone; private snippets are visible only to the owner and approved users.
 4. Non-owners can request access from the snippet detail page. Admins approve or deny requests.
 5. Approved users gain read-only access to the snippet.
@@ -66,6 +66,8 @@ Force HTTPS redirects by setting `SIMPPETSSRV_FORCE_HTTPS=true`. When serving be
 ## CLI Entry Point
 
 Run `python -m simppetssrv` to start the server. The script prints a helpful URL with your LAN IP when binding to `0.0.0.0`.
+
+⚠️ Password reset par email n’est pas pris en charge dans cette version. Prévoir une procédure interne (ex. admin CLI) si vous devez réinitialiser des comptes.
 
 ## Data Storage
 

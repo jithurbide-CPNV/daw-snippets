@@ -12,17 +12,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from .members import (
+    SESSION_TTL,
     build_member_cookie,
-    consume_email_token,
-    consume_password_reset_token,
     create_user,
     fetch_user_by_email,
     fetch_user_by_id,
-    issue_email_token,
-    issue_password_reset_token,
-    mark_email_verified,
     parse_member_cookie,
-    update_password,
     verify_password,
 )
 from .snippets import (
@@ -53,7 +48,7 @@ def create_app(
     admin_password: str | None = None,
     force_https: bool | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="Snippet Vault", version="0.2.0")
+    app = FastAPI(title="Snippet Vault", version="0.3.0")
 
     app.add_middleware(
         CORSMiddleware,
@@ -66,7 +61,7 @@ def create_app(
     resolved_force_https = (
         force_https
         if force_https is not None
-        else os.getenv("SIMPPETSSRV_FORCE_HTTPS", "true").lower() in {"1", "true", "yes"}
+        else os.getenv("SIMPPETSSRV_FORCE_HTTPS", "false").lower() in {"1", "true", "yes"}
     )
 
     if resolved_force_https:
@@ -295,28 +290,37 @@ def create_app(
     @app.post("/signup", response_class=HTMLResponse)
     async def signup_submit(
         request: Request, email: str = Form(...), password: str = Form(...)
-    ) -> HTMLResponse:
+    ) -> Response:
         db_path = _get_db_path(request)
         email_normalized = email.strip().lower()
+        if not email_normalized or "@" not in email_normalized:
+            return HTMLResponse(
+                content=_render_signup(error="Adresse email invalide"),
+                status_code=400,
+            )
+        if len(password) < 8:
+            return HTMLResponse(
+                content=_render_signup(error="Mot de passe trop court (8 caractères minimum)"),
+                status_code=400,
+            )
         user_id = create_user(db_path, email=email_normalized, password=password)
         if user_id == -1:
             return HTMLResponse(
-                content=_render_signup(error="Adresse déjà utilisée"), status_code=400
+                content=_render_signup(error="Adresse déjà utilisée"),
+                status_code=400,
             )
-        token = issue_email_token(db_path, user_id)
-        _send_verification_email(request, email=email_normalized, token=token)
-        return HTMLResponse(content=_render_signup(success=email_normalized))
-
-    @app.get("/verify", response_class=HTMLResponse)
-    async def verify_email(request: Request, token: str) -> HTMLResponse:
-        db_path = _get_db_path(request)
-        user_id = consume_email_token(db_path, token)
-        if user_id is None:
-            return HTMLResponse(
-                content=_render_verify(error="Lien invalide ou expiré"), status_code=400
-            )
-        mark_email_verified(db_path, user_id)
-        return HTMLResponse(content=_render_verify())
+        secret = request.app.state.session_secret
+        response = RedirectResponse(url="/", status_code=303)
+        cookie = build_member_cookie(secret, user_id)
+        response.set_cookie(
+            "snippet_member",
+            cookie,
+            httponly=True,
+            secure=resolved_force_https,
+            samesite="lax",
+            max_age=int(SESSION_TTL.total_seconds()),
+        )
+        return response
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_form() -> HTMLResponse:
@@ -333,17 +337,15 @@ def create_app(
             return HTMLResponse(
                 content=_render_login(error="Identifiants invalides"), status_code=401
             )
-        if not user.get("email_verified"):
-            return HTMLResponse(content=_render_login(error="Email non vérifié"), status_code=401)
         response = RedirectResponse(url="/", status_code=303)
         cookie = build_member_cookie(secret, int(user["id"]))
         response.set_cookie(
             "snippet_member",
             cookie,
             httponly=True,
-            secure=True,
+            secure=resolved_force_https,
             samesite="lax",
-            max_age=12 * 60 * 60,
+            max_age=int(SESSION_TTL.total_seconds()),
         )
         return response
 
@@ -353,44 +355,13 @@ def create_app(
         response.delete_cookie("snippet_member")
         return response
 
-    @app.get("/forgot", response_class=HTMLResponse)
-    async def forgot_form() -> HTMLResponse:
-        return HTMLResponse(content=_render_forgot())
-
-    @app.post("/forgot", response_class=HTMLResponse)
-    async def forgot_submit(request: Request, email: str = Form(...)) -> HTMLResponse:
-        db_path = _get_db_path(request)
-        email_normalized = email.strip().lower()
-        user = fetch_user_by_email(db_path, email_normalized)
-        if user:
-            token = issue_password_reset_token(db_path, int(user["id"]))
-            _send_password_reset_email(request, email=email_normalized, token=token)
-        return HTMLResponse(content=_render_forgot(sent=True))
-
-    @app.get("/reset", response_class=HTMLResponse)
-    async def reset_form(token: str) -> HTMLResponse:
-        return HTMLResponse(content=_render_reset(token))
-
-    @app.post("/reset", response_class=HTMLResponse)
-    async def reset_submit(
-        request: Request, token: str = Form(...), password: str = Form(...)
-    ) -> HTMLResponse:
-        db_path = _get_db_path(request)
-        user_id = consume_password_reset_token(db_path, token)
-        if user_id is None:
-            return HTMLResponse(
-                content=_render_reset(token, error="Lien invalide ou expiré"), status_code=400
-            )
-        update_password(db_path, user_id, password)
-        return HTMLResponse(content=_render_reset_success())
-
     @app.get("/account", response_class=HTMLResponse)
     async def account_page(
         request: Request, member: dict[str, Any] = Depends(_require_member)
     ) -> HTMLResponse:
         db_path = _get_db_path(request)
         private_count = count_private_snippets(db_path, int(member["id"]))
-        requests_summary = []
+        requests_summary: list[dict[str, Any]] = []
         return HTMLResponse(
             content=_render_account(member, private_count=private_count, requests=requests_summary)
         )
@@ -499,13 +470,14 @@ def _bootstrap_admin_user(db_path: str, email: str | None, password: str | None)
     if existing and existing.get("role") == "admin":
         return
     if existing:
+        # Utilise update_password pour régénérer le hachage et s'assurer du rôle admin
+        logger.info("Mise à jour du compte admin existant %s", email_normalized)
+        from .members import update_password  # import local pour éviter cycle
+
         update_password(db_path, int(existing["id"]), password)
-        mark_email_verified(db_path, int(existing["id"]))
         return
-    user_id = create_user(
-        db_path, email=email_normalized, password=password, role="admin", verified=True
-    )
-    if user_id == -1:
+    created = create_user(db_path, email=email_normalized, password=password, role="admin")
+    if created == -1:
         logger.warning("Impossible de créer l'administrateur par défaut")
 
 
@@ -514,7 +486,8 @@ def _render_home(*, snippets: list[dict[str, Any]], member: dict[str, Any] | Non
     for snippet in snippets:
         language = escape(snippet.get("language") or "text")
         title = escape(snippet.get("title") or "Snippet sans nom")
-        description = escape((snippet.get("description") or "").strip() or "Aucune description")
+        description_raw = (snippet.get("description") or "").strip()
+        description = escape(description_raw or "Aucune description")
         cards.append(
             f"""
             <article class=\"snippet-card\">
@@ -687,7 +660,7 @@ def _render_signup(error: str | None = None, success: str | None = None) -> str:
     if error:
         message = f"<p class='error'>{escape(error)}</p>"
     elif success:
-        message = f"<p class='info'>Nous avons envoyé un email à {escape(success)}.</p>"
+        message = "<p class='info'>Compte créé. Vous pouvez vous connecter immédiatement.</p>"
     return _auth_page("Créer un compte", "signup", message)
 
 
@@ -696,42 +669,14 @@ def _render_login(error: str | None = None) -> str:
     return _auth_page("Se connecter", "login", message)
 
 
-def _render_forgot(sent: bool = False) -> str:
-    message = "<p class='info'>Si un compte existe, un email a été envoyé.</p>" if sent else ""
-    return _auth_page("Réinitialiser le mot de passe", "forgot", message)
-
-
-def _render_reset(token: str, error: str | None = None) -> str:
-    message = f"<p class='error'>{escape(error)}</p>" if error else ""
-    extra = f"<input type='hidden' name='token' value='{escape(token)}' />"
-    return _auth_page("Nouveau mot de passe", "reset", message, extra_fields=extra)
-
-
-def _render_reset_success() -> str:
-    return _auth_page(
-        "Mot de passe mis à jour",
-        "login",
-        "<p class='info'>Vous pouvez maintenant vous connecter.</p>",
-    )
-
-
-def _render_verify(error: str | None = None) -> str:
-    message = (
-        f"<p class='error'>{escape(error)}</p>"
-        if error
-        else "<p class='info'>Email vérifié. Vous pouvez vous connecter.</p>"
-    )
-    return _auth_page("Vérification", "login", message)
-
-
 def _auth_page(title: str, form_action: str, message: str, *, extra_fields: str = "") -> str:
     password_field = ""
-    if form_action in {"signup", "login", "reset"}:
+    if form_action in {"signup", "login"}:
         password_field = (
             "<label>Mot de passe<input type='password' name='password' required /></label>"
         )
     email_field = ""
-    if form_action in {"signup", "login", "forgot"}:
+    if form_action in {"signup", "login"}:
         email_field = "<label>Email<input type='email' name='email' required /></label>"
     return f"""
     <!DOCTYPE html>
@@ -754,7 +699,6 @@ def _auth_page(title: str, form_action: str, message: str, *, extra_fields: str 
           <div class=\"switch\">
             <a href=\"/login\">Connexion</a>
             <a href=\"/signup\">Inscription</a>
-            <a href=\"/forgot\">Mot de passe oublié</a>
           </div>
         </main>
       </body>
@@ -930,11 +874,3 @@ _BASE_STYLES = """
   }
 </style>
 """
-
-
-def _send_verification_email(request: Request, *, email: str, token: str) -> None:
-    logger.info("Envoi fictif du mail de vérification pour %s avec token %s", email, token)
-
-
-def _send_password_reset_email(request: Request, *, email: str, token: str) -> None:
-    logger.info("Envoi fictif du mail de réinitialisation pour %s avec token %s", email, token)
